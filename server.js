@@ -10,7 +10,7 @@ const server = http.createServer(app);
 
 const io = new Server(server, {
   cors: {
-    origin: "*",
+    origin: "*", // 🔓 Libera o frontend
     methods: ["GET", "POST", "DELETE", "PUT"]
   }
 });
@@ -18,12 +18,13 @@ const io = new Server(server, {
 app.use(cors({ origin: "*" }));
 app.use(express.json());
 
-mongoose.connect(
-  "mongodb+srv://wagnerjuniorsql:Daledoly12@cluster0.oc1at.mongodb.net/pcm?retryWrites=true&w=majority",
-  { useNewUrlParser: true, useUnifiedTopology: true }
-)
+// ✅ Conexão com o MongoDB Atlas
+mongoose.connect(process.env.MONGO_URI, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true,
+})
 .then(() => console.log("✅ MongoDB conectado"))
-.catch(err => console.log("❌ Erro MongoDB:", err));
+.catch(err => console.error("❌ Erro MongoDB:", err));
 
 const assetSchema = new mongoose.Schema({
   name: String,
@@ -36,74 +37,18 @@ const assetSchema = new mongoose.Schema({
 
 const Asset = mongoose.model("Asset", assetSchema);
 
+// ✅ Rota inicial para teste
+app.get("/", (req, res) => {
+  res.send("✅ API do PCM Backend está online!");
+});
+
+// === ROTAS CRUD ===
 app.get("/assets", async (req, res) => {
   try {
     const assets = await Asset.find();
     res.json(assets);
   } catch (err) {
     res.status(500).json({ error: "Erro ao buscar ativos" });
-  }
-});
-
-app.put("/assets/:id", async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { name, parentId, isCritical, isPinned, itemErp, equipmentFunction } = req.body;
-
-    const updated = await Asset.findByIdAndUpdate(
-      id,
-      { 
-        name,
-        parentId: parentId !== undefined ? parentId : null,
-        isCritical,
-        isPinned, 
-        itemErp,
-        equipmentFunction
-      },
-      { new: true }
-    );
-
-    if (!updated) return res.status(404).json({ error: "Ativo não encontrado" });
-
-    io.emit("asset-updated"); 
-    res.json(updated);
-  } catch (err) {
-    res.status(500).json({ error: "Erro ao atualizar ativo" });
-  }
-});
-
-let assetsHistory = [];
-
-app.post(["/assets/saveState", "/api/assets/saveState"], (req, res) => {
-  console.log("📥 Recebido /assets/saveState ou /api/assets/saveState");
-  const { assets } = req.body;
-
-  if (!assets) {
-    return res.status(400).json({ error: "Nenhum dado recebido" });
-  }
-
-  assetsHistory.push(JSON.stringify(assets));
-  console.log("📦 Histórico salvo. Total:", assetsHistory.length);
-  res.sendStatus(200);
-});
-
-app.post("/api/assets/saveState", (req, res) => {
-  console.log("Recebido:", req.body); 
-  const { assets } = req.body;
-  assetsHistory.push(JSON.stringify(assets));
-  res.sendStatus(200);
-});
-
-app.post("/api/assets/restoreState", (req, res) => {
-  const { index } = req.body;
-  if (assetsHistory[index]) {
-    const restoredAssets = JSON.parse(assetsHistory[index]);
-    Asset.deleteMany({})
-      .then(() => Asset.insertMany(restoredAssets))
-      .then(() => res.json({ success: true }))
-      .catch((err) => res.status(500).json({ error: err.message }));
-  } else {
-    res.status(404).json({ error: "Estado não encontrado" });
   }
 });
 
@@ -120,19 +65,40 @@ app.post("/assets", async (req, res) => {
   }
 });
 
-app.delete("/assets/:id", async (req, res) => {
-  const { id } = req.params;
+app.put("/assets/:id", async (req, res) => {
   try {
+    const { id } = req.params;
+    const { name, parentId, isCritical, isPinned, itemErp, equipmentFunction } = req.body;
+
+    const updated = await Asset.findByIdAndUpdate(
+      id,
+      { name, parentId, isCritical, isPinned, itemErp, equipmentFunction },
+      { new: true }
+    );
+
+    if (!updated) return res.status(404).json({ error: "Ativo não encontrado" });
+
+    io.emit("asset-updated");
+    res.json(updated);
+  } catch (err) {
+    res.status(500).json({ error: "Erro ao atualizar ativo" });
+  }
+});
+
+app.delete("/assets/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
     const deleted = await Asset.findByIdAndDelete(id);
     if (!deleted) return res.status(404).json({ error: "Ativo não encontrado" });
 
-    io.emit("asset-updated"); 
+    io.emit("asset-updated");
     res.status(200).json({ message: "Ativo excluído com sucesso" });
   } catch (err) {
     res.status(500).json({ error: "Erro ao excluir ativo" });
   }
 });
 
+// === WebSocket ===
 io.on("connection", (socket) => {
   console.log("🟢 Cliente conectado:", socket.id);
   socket.on("disconnect", () => {
@@ -140,6 +106,7 @@ io.on("connection", (socket) => {
   });
 });
 
-server.listen(PORT, () => {
-  console.log(`🚀 Backend rodando em http://localhost:${PORT}`);
+// ✅ Escuta a porta correta (obrigatório para Render / Fly.io)
+server.listen(PORT, "0.0.0.0", () => {
+  console.log(`🚀 Backend rodando na porta ${PORT}`);
 });
