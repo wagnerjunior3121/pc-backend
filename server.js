@@ -16,7 +16,8 @@ const io = new Server(server, {
 });
 
 app.use(cors({ origin: "*" }));
-app.use(express.json());
+
+app.use(express.json({ limit: '100mb' })); 
 
 // ✅ Conexão MongoDB
 mongoose.connect(process.env.MONGO_URI, {
