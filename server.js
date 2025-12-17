@@ -3,6 +3,7 @@ const mongoose = require("mongoose");
 const cors = require("cors");
 const { Server } = require("socket.io");
 const http = require("http");
+const xlsx = require("xlsx");
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -16,10 +17,8 @@ const io = new Server(server, {
 });
 
 app.use(cors({ origin: "*" }));
+app.use(express.json({ limit: '100mb' }));
 
-app.use(express.json({ limit: '100mb' })); 
-
-// ✅ Conexão MongoDB
 mongoose.connect(process.env.MONGO_URI, {
   useNewUrlParser: true,
   useUnifiedTopology: true,
@@ -27,7 +26,7 @@ mongoose.connect(process.env.MONGO_URI, {
 .then(() => console.log("✅ MongoDB conectado"))
 .catch(err => console.log("❌ Erro MongoDB:", err));
 
-// ✅ Schema do ativo
+// Schema do ativo
 const assetSchema = new mongoose.Schema({
   name: String,
   parentId: { type: String, default: null },
@@ -35,16 +34,17 @@ const assetSchema = new mongoose.Schema({
   isPinned: { type: Boolean, default: false },
   itemErp: { type: String, default: "" },
   equipmentFunction: { type: String, default: "" },
+  quantidade: { type: Number, default: 0 },
 });
 
 const Asset = mongoose.model("Asset", assetSchema);
 
-// ✅ Rota de teste
+// Rota de teste
 app.get("/", (req, res) => {
   res.send("🚀 Backend ativo e funcionando!");
 });
 
-// ✅ Buscar todos os ativos
+// Buscar todos os ativos
 app.get(["/assets", "/api/assets"], async (req, res) => {
   try {
     const assets = await Asset.find();
@@ -54,11 +54,11 @@ app.get(["/assets", "/api/assets"], async (req, res) => {
   }
 });
 
-// ✅ Criar novo ativo
+// Criar novo ativo
 app.post(["/assets", "/api/assets"], async (req, res) => {
   try {
-    const { name, parentId, isCritical, itemErp, equipmentFunction } = req.body;
-    const newAsset = new Asset({ name, parentId, isCritical, itemErp, equipmentFunction });
+    const { name, parentId, isCritical, itemErp, equipmentFunction, quantidade } = req.body;
+    const newAsset = new Asset({ name, parentId, isCritical, itemErp, equipmentFunction, quantidade });
     await newAsset.save();
 
     io.emit("asset-updated");
@@ -68,15 +68,15 @@ app.post(["/assets", "/api/assets"], async (req, res) => {
   }
 });
 
-// ✅ Atualizar ativo
+// Atualizar ativo
 app.put(["/assets/:id", "/api/assets/:id"], async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, parentId, isCritical, isPinned, itemErp, equipmentFunction } = req.body;
+    const { name, parentId, isCritical, isPinned, itemErp, equipmentFunction, quantidade } = req.body;
 
     const updated = await Asset.findByIdAndUpdate(
       id,
-      { name, parentId: parentId ?? null, isCritical, isPinned, itemErp, equipmentFunction },
+      { name, parentId: parentId ?? null, isCritical, isPinned, itemErp, equipmentFunction, quantidade },
       { new: true }
     );
 
@@ -89,7 +89,7 @@ app.put(["/assets/:id", "/api/assets/:id"], async (req, res) => {
   }
 });
 
-// ✅ Excluir ativo
+// Excluir ativo
 app.delete(["/assets/:id", "/api/assets/:id"], async (req, res) => {
   try {
     const { id } = req.params;
@@ -103,7 +103,7 @@ app.delete(["/assets/:id", "/api/assets/:id"], async (req, res) => {
   }
 });
 
-// ✅ Histórico de estados
+// Histórico de estados
 let assetsHistory = [];
 
 app.post(["/assets/saveState", "/api/assets/saveState"], (req, res) => {
@@ -130,7 +130,7 @@ app.post(["/assets/restoreState", "/api/assets/restoreState"], (req, res) => {
   }
 });
 
-// ✅ WebSocket
+// WebSocket
 io.on("connection", (socket) => {
   console.log("🟢 Cliente conectado:", socket.id);
   socket.on("disconnect", () => {
@@ -138,7 +138,66 @@ io.on("connection", (socket) => {
   });
 });
 
-// ✅ Inicialização do servidor
+// Endpoint para importar quantidades da planilha
+// Recebe JSON opcional: { path: "\\licnt\\tecnica\\...\\mapa_de_estoque.xlsx" }
+app.post('/assets/import-quantidades', async (req, res) => {
+  try {
+    const defaultPath = '\\licnt\\tecnica\\10_M_Op_G\\Planejamento\\PCM\\Pecas_Criticas_Oficial\\mapa_de_estoque.xlsx';
+    const filePath = req.body && req.body.path ? req.body.path : defaultPath;
+
+    // Abre planilha
+    const workbook = xlsx.readFile(filePath, { cellDates: true });
+    const sheetName = workbook.SheetNames[0];
+    const sheet = workbook.Sheets[sheetName];
+
+    // Converte em JSON por linhas (A -> coluna 1, K -> coluna 11)
+    const range = xlsx.utils.decode_range(sheet['!ref']);
+    const codeToQty = {};
+
+    for (let R = range.s.r; R <= range.e.r; ++R) {
+      const cellA = sheet[xlsx.utils.encode_cell({ r: R, c: 0 })]; // coluna A
+      const cellK = sheet[xlsx.utils.encode_cell({ r: R, c: 10 })]; // coluna K (0-based)
+      if (!cellA) continue;
+      const code = (cellA.v || '').toString().trim();
+      if (!code) continue;
+
+      let qty = 0;
+      if (cellK && (cellK.v !== undefined && cellK.v !== null)) {
+        // tenta converter para número
+        const n = Number(cellK.v);
+        qty = isNaN(n) ? 0 : n;
+      }
+      codeToQty[code] = qty;
+    }
+
+    // Buscar assets e atualizar quantidade
+    const assets = await Asset.find();
+    const bulkOps = assets.map(a => {
+      const lookupKey = (a.itemErp || a.name || '').toString().trim();
+      if (lookupKey && codeToQty.hasOwnProperty(lookupKey)) {
+        return {
+          updateOne: {
+            filter: { _id: a._id },
+            update: { $set: { quantidade: codeToQty[lookupKey] } }
+          }
+        };
+      }
+      return null;
+    }).filter(Boolean);
+
+    if (bulkOps.length > 0) {
+      await Asset.bulkWrite(bulkOps);
+    }
+
+    io.emit('asset-updated');
+    res.json({ success: true, updated: bulkOps.length });
+  } catch (err) {
+    console.error('Erro ao importar quantidades:', err.message || err);
+    res.status(500).json({ error: 'Erro ao importar quantidades', details: err.message });
+  }
+});
+
+// Inicialização do servidor
 server.listen(PORT, () => {
-  console.log(`🚀 Backend rodando na porta ${PORT}`);
+  console.log(`🚀 Backend rodando em http://localhost:${PORT}`);
 });
