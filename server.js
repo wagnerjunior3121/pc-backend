@@ -142,7 +142,7 @@ io.on("connection", (socket) => {
 // Recebe JSON opcional: { path: "\\licnt\\tecnica\\...\\mapa_de_estoque.xlsx" }
 app.post('/assets/import-quantidades', async (req, res) => {
   try {
-    const defaultPath = '\\licnt\\tecnica\\10_M_Op_G\\Planejamento\\PCM\\Pecas_Criticas_Oficial\\mapa_de_estoque.xlsx';
+    const defaultPath = '\\licnt\\tecnica\\10_M_Op_G\\Planejamento\\PCM\\Pecas_Críticas_Oficial\\mapa_de_estoque.xlsx';
     const filePath = req.body && req.body.path ? req.body.path : defaultPath;
 
     // Abre planilha
