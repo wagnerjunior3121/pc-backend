@@ -177,25 +177,26 @@ app.post('/assets/import-quantidades', async (req, res) => {
     let linhasLidas = 0;
 
     for (let R = range.s.r; R <= range.e.r; ++R) {
-      const cellA = sheet[xlsx.utils.encode_cell({ r: R, c: 0 })]; // coluna A
-      const cellK = sheet[xlsx.utils.encode_cell({ r: R, c: 10 })]; // coluna K (0-based)
+      const cellA = sheet[xlsx.utils.encode_cell({ r: R, c: 0 })];
+      const cellK = sheet[xlsx.utils.encode_cell({ r: R, c: 10 })];
+    
       if (!cellA) continue;
+    
       const code = (cellA.v || '').toString().trim();
       if (!code) continue;
-
+    
       let qty = 0;
-      if (cellK && (cellK.v !== undefined && cellK.v !== null)) {
-        // tenta converter para número
+      if (cellK && cellK.v !== undefined && cellK.v !== null) {
         const n = Number(cellK.v);
         qty = isNaN(n) ? 0 : n;
       }
+    
       codeToQty[code] = qty;
       linhasLidas++;
-    }
-
-    //Loga as 5 primeiras linhas válidas
-    if (linhasLidas <= 5) {
-      console.log(`📌 Linha ${R + 1} | Código: "${code}" | Qtd: ${qty}`);
+    
+      // 🔍 loga apenas as 5 primeiras linhas válidas
+      if (linhasLidas <= 5) {
+        console.log(`📌 Linha ${R + 1} | Código: "${code}" | Qtd: ${qty}`);
       }
     }
 
