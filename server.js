@@ -4,6 +4,7 @@ const cors = require("cors");
 const { Server } = require("socket.io");
 const http = require("http");
 const xlsx = require("xlsx");
+const fs = require("fs");
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -143,8 +144,8 @@ io.on("connection", (socket) => {
 app.post('/assets/import-quantidades', async (req, res) => {
   try {
     console.log("📥 Iniciando importação de quantidades...");
-    const defaultPath = '\\licnt\\tecnica\\10_M_Op_G\\Planejamento\\PCM\\Pecas_Críticas_Oficial\\mapa_de_estoque.xlsx';
-    const filePath = req.body && req.body.path ? req.body.path : defaultPath;
+    const defaultPath = '\\\\licnt\\tecnica\\10_M_Op_G\\Planejamento\\PCM\\Pecas_Críticas_Oficial\\mapa_de_estoque.xlsx';
+    const filePath = req.body?.path || defaultPath;
     console.log("📂 Caminho do arquivo recebido:", filePath);
 
     // 🔎 Verifica se o arquivo existe
@@ -163,8 +164,7 @@ app.post('/assets/import-quantidades', async (req, res) => {
     const sheet = workbook.Sheets[sheetName];
 
     if (!sheet || !sheet['!ref']) {
-      console.error("❌ Sheet inválida ou sem !ref");
-      return res.status(400).json({ error: "Planilha vazia ou inválida" });
+     return res.status(400).json({ error: "Planilha vazia ou inválida" });
     }
 
     console.log("📄 Usando sheet:", sheetName);
