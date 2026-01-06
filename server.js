@@ -4,7 +4,6 @@ const cors = require("cors");
 const { Server } = require("socket.io");
 const http = require("http");
 const xlsx = require("xlsx");
-const fs = require("fs");
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -143,74 +142,39 @@ io.on("connection", (socket) => {
 // Recebe JSON opcional: { path: "\\licnt\\tecnica\\...\\mapa_de_estoque.xlsx" }
 app.post('/assets/import-quantidades', async (req, res) => {
   try {
-    console.log("📥 Iniciando importação de quantidades...");
-    const defaultPath = '\\\\licnt\\tecnica\\10_M_Op_G\\Planejamento\\PCM\\Pecas_Críticas_Oficial\\mapa_de_estoque.xlsx';
-    const filePath = req.body?.path || defaultPath;
-    console.log("📂 Caminho do arquivo recebido:", filePath);
-
-    // 🔎 Verifica se o arquivo existe
-    if (!fs.existsSync(filePath)) {
-      console.error("❌ Arquivo NÃO encontrado no caminho informado");
-      return res.status(404).json({ error: "Arquivo não encontrado", path: filePath });
-    }
-
-    console.log("✅ Arquivo encontrado");
+    const defaultPath = '\\licnt\\tecnica\\10_M_Op_G\\Planejamento\\PCM\\Pecas_Criticas_Oficial\\mapa_de_estoque.xlsx';
+    const filePath = req.body && req.body.path ? req.body.path : defaultPath;
 
     // Abre planilha
     const workbook = xlsx.readFile(filePath, { cellDates: true });
-    console.log("📘 Planilha carregada com sucesso");
-    console.log("📄 Sheets disponíveis:", workbook.SheetNames);
     const sheetName = workbook.SheetNames[0];
     const sheet = workbook.Sheets[sheetName];
 
-    if (!sheet || !sheet['!ref']) {
-     return res.status(400).json({ error: "Planilha vazia ou inválida" });
-    }
-
-    console.log("📄 Usando sheet:", sheetName);
-    console.log("📐 Intervalo da planilha (!ref):", sheet['!ref']);
-
     // Converte em JSON por linhas (A -> coluna 1, K -> coluna 11)
     const range = xlsx.utils.decode_range(sheet['!ref']);
-    console.log("📊 Range decodificado:", range);
     const codeToQty = {};
-    let linhasLidas = 0;
 
     for (let R = range.s.r; R <= range.e.r; ++R) {
-      const cellA = sheet[xlsx.utils.encode_cell({ r: R, c: 0 })];
-      const cellK = sheet[xlsx.utils.encode_cell({ r: R, c: 10 })];
-    
+      const cellA = sheet[xlsx.utils.encode_cell({ r: R, c: 0 })]; // coluna A
+      const cellK = sheet[xlsx.utils.encode_cell({ r: R, c: 10 })]; // coluna K (0-based)
       if (!cellA) continue;
-    
       const code = (cellA.v || '').toString().trim();
       if (!code) continue;
-    
+
       let qty = 0;
-      if (cellK && cellK.v !== undefined && cellK.v !== null) {
+      if (cellK && (cellK.v !== undefined && cellK.v !== null)) {
+        // tenta converter para número
         const n = Number(cellK.v);
         qty = isNaN(n) ? 0 : n;
       }
-    
       codeToQty[code] = qty;
-      linhasLidas++;
-    
-      // 🔍 loga apenas as 5 primeiras linhas válidas
-      if (linhasLidas <= 5) {
-        console.log(`📌 Linha ${R + 1} | Código: "${code}" | Qtd: ${qty}`);
-      }
     }
-
-    console.log(`📦 Total de linhas válidas lidas da planilha: ${linhasLidas}`);
-    console.log(`🔑 Total de códigos únicos encontrados: ${Object.keys(codeToQty).length}`);
 
     // Buscar assets e atualizar quantidade
     const assets = await Asset.find();
-    console.log(`🗃️ Total de assets no banco: ${assets.length}`);
-    let encontrados = 0;
     const bulkOps = assets.map(a => {
       const lookupKey = (a.itemErp || a.name || '').toString().trim();
       if (lookupKey && codeToQty.hasOwnProperty(lookupKey)) {
-        encontrados++;
         return {
           updateOne: {
             filter: { _id: a._id },
@@ -221,18 +185,12 @@ app.post('/assets/import-quantidades', async (req, res) => {
       return null;
     }).filter(Boolean);
 
-    console.log(`🔄 Assets com correspondência encontrada: ${encontrados}`);
-    console.log(`📝 Operações de update preparadas: ${bulkOps.length}`);
-
     if (bulkOps.length > 0) {
       await Asset.bulkWrite(bulkOps);
-      console.log("✅ Atualização em massa realizada com sucesso");
-    } else {
-      console.warn("⚠️ Nenhum asset correspondeu aos códigos da planilha");
     }
 
     io.emit('asset-updated');
-    res.json({ success: true, updated: bulkOps.length, linhasLidas, totalAssets: assets.length });
+    res.json({ success: true, updated: bulkOps.length });
   } catch (err) {
     console.error('Erro ao importar quantidades:', err.message || err);
     res.status(500).json({ error: 'Erro ao importar quantidades', details: err.message });
