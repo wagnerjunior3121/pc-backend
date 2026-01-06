@@ -153,6 +153,7 @@ app.post('/assets/import-quantidades', async (req, res) => {
     // Converte em JSON por linhas (A -> coluna 1, K -> coluna 11)
     const range = xlsx.utils.decode_range(sheet['!ref']);
     const codeToQty = {};
+    const parseFailures = [];
 
     for (let R = range.s.r; R <= range.e.r; ++R) {
       const cellA = sheet[xlsx.utils.encode_cell({ r: R, c: 0 })]; // coluna A
@@ -168,9 +169,30 @@ app.post('/assets/import-quantidades', async (req, res) => {
 
       let qty = 0;
       if (cellK && (cellK.v !== undefined && cellK.v !== null)) {
-        // tenta converter para número
-        const n = Number(cellK.v);
-        qty = isNaN(n) ? 0 : n;
+        let rawQty = cellK.v;
+        // Normalize strings like "7,00" or "1.234,56" to a form Number() understands (e.g. "1234.56")
+        if (typeof rawQty === 'string') {
+          rawQty = rawQty.trim();
+          // Remove non-breaking spaces
+          rawQty = rawQty.replace(/\u00A0/g, '');
+          // If both dot and comma present, assume dot is thousands separator and comma is decimal
+          if (rawQty.includes(',') && rawQty.includes('.')) {
+            rawQty = rawQty.replace(/\./g, '').replace(/,/g, '.');
+          } else {
+            // Replace comma with dot (handles "7,00")
+            rawQty = rawQty.replace(/,/g, '.');
+          }
+          // Keep only digits, dot and minus
+          rawQty = rawQty.replace(/[^\d\.\-]/g, '');
+        }
+        const n = Number(rawQty);
+        if (isNaN(n)) {
+          // save small sample for diagnostics
+          parseFailures.push({ row: R + 1, code: raw, rawValue: cellK.v });
+          qty = 0;
+        } else {
+          qty = n;
+        }
       }
 
       // Armazena a mesma quantidade em várias chaves normalizadas para facilitar o lookup
@@ -219,13 +241,16 @@ app.post('/assets/import-quantidades', async (req, res) => {
     }
 
     console.log(`📥 Importado ${Object.keys(codeToQty).length} chaves da planilha. Assets: ${assets.length}, atualizados: ${bulkOps.length}, não encontrados (ex.: ${unmatched.length}):`, unmatched.slice(0, 10));
+    if (parseFailures.length > 0) {
+      console.log(`⚠️ ${parseFailures.length} linhas tiveram erro ao parsear quantidade (ex.):`, parseFailures.slice(0, 10));
+    }
 
     if (bulkOps.length > 0) {
       await Asset.bulkWrite(bulkOps);
     }
 
     io.emit('asset-updated');
-    res.json({ success: true, updated: bulkOps.length, parsedKeys: Object.keys(codeToQty).length, unmatchedSample: unmatched.slice(0, 10) });
+    res.json({ success: true, updated: bulkOps.length, parsedKeys: Object.keys(codeToQty).length, unmatchedSample: unmatched.slice(0, 10), parseFailures: parseFailures.slice(0, 10) });
   } catch (err) {
     console.error('Erro ao importar quantidades:', err.message || err);
     res.status(500).json({ error: 'Erro ao importar quantidades', details: err.message });
