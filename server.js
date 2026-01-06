@@ -17,7 +17,7 @@ const io = new Server(server, {
 });
 
 app.use(cors({ origin: "*" }));
-app.use(express.json({ limit: "100mb" }));
+app.use(express.json({ limit: '100mb' }));
 
 mongoose.connect(process.env.MONGO_URI, {
   useNewUrlParser: true,
@@ -26,9 +26,7 @@ mongoose.connect(process.env.MONGO_URI, {
 .then(() => console.log("✅ MongoDB conectado"))
 .catch(err => console.log("❌ Erro MongoDB:", err));
 
-/* =========================
-   Schema
-========================= */
+// Schema do ativo
 const assetSchema = new mongoose.Schema({
   name: String,
   parentId: { type: String, default: null },
@@ -41,24 +39,12 @@ const assetSchema = new mongoose.Schema({
 
 const Asset = mongoose.model("Asset", assetSchema);
 
-/* =========================
-   Utilitário
-========================= */
-function normalize(v) {
-  return (v ?? "")
-    .toString()
-    .trim()
-    .toUpperCase()
-    .replace(/\s+/g, "");
-}
-
-/* =========================
-   Rotas básicas
-========================= */
+// Rota de teste
 app.get("/", (req, res) => {
   res.send("🚀 Backend ativo e funcionando!");
 });
 
+// Buscar todos os ativos
 app.get(["/assets", "/api/assets"], async (req, res) => {
   try {
     const assets = await Asset.find();
@@ -68,6 +54,7 @@ app.get(["/assets", "/api/assets"], async (req, res) => {
   }
 });
 
+// Criar novo ativo
 app.post(["/assets", "/api/assets"], async (req, res) => {
   try {
     const { name, parentId, isCritical, itemErp, equipmentFunction, quantidade } = req.body;
@@ -81,6 +68,7 @@ app.post(["/assets", "/api/assets"], async (req, res) => {
   }
 });
 
+// Atualizar ativo
 app.put(["/assets/:id", "/api/assets/:id"], async (req, res) => {
   try {
     const { id } = req.params;
@@ -101,6 +89,7 @@ app.put(["/assets/:id", "/api/assets/:id"], async (req, res) => {
   }
 });
 
+// Excluir ativo
 app.delete(["/assets/:id", "/api/assets/:id"], async (req, res) => {
   try {
     const { id } = req.params;
@@ -114,13 +103,13 @@ app.delete(["/assets/:id", "/api/assets/:id"], async (req, res) => {
   }
 });
 
-/* =========================
-   Histórico de estados
-========================= */
+// Histórico de estados
 let assetsHistory = [];
 
 app.post(["/assets/saveState", "/api/assets/saveState"], (req, res) => {
+  console.log("📥 Recebido /assets/saveState ou /api/assets/saveState");
   const { assets } = req.body;
+
   if (!assets) return res.status(400).json({ error: "Nenhum dado recebido" });
 
   assetsHistory.push(JSON.stringify(assets));
@@ -141,9 +130,7 @@ app.post(["/assets/restoreState", "/api/assets/restoreState"], (req, res) => {
   }
 });
 
-/* =========================
-   WebSocket
-========================= */
+// WebSocket
 io.on("connection", (socket) => {
   console.log("🟢 Cliente conectado:", socket.id);
   socket.on("disconnect", () => {
@@ -151,84 +138,101 @@ io.on("connection", (socket) => {
   });
 });
 
-/* =========================
-   IMPORTAÇÃO DE QUANTIDADES
-========================= */
-app.post("/assets/import-quantidades", async (req, res) => {
+// Endpoint para importar quantidades da planilha
+// Recebe JSON opcional: { path: "\\licnt\\tecnica\\...\\mapa_de_estoque.xlsx" }
+app.post('/assets/import-quantidades', async (req, res) => {
   try {
-    const defaultPath =
-      "\\\\licnt\\tecnica\\10_M_Op_G\\Planejamento\\PCM\\Pecas_Criticas_Oficial\\mapa_de_estoque.xlsx";
+    const defaultPath = '\\licnt\\tecnica\\10_M_Op_G\\Planejamento\\PCM\\Pecas_Criticas_Oficial\\mapa_de_estoque.xlsx';
+    const filePath = req.body && req.body.path ? req.body.path : defaultPath;
 
-    const filePath = req.body?.path || defaultPath;
-
-    console.log("📄 Lendo planilha:", filePath);
-
+    // Abre planilha
     const workbook = xlsx.readFile(filePath, { cellDates: true });
     const sheetName = workbook.SheetNames[0];
     const sheet = workbook.Sheets[sheetName];
 
-    const range = xlsx.utils.decode_range(sheet["!ref"]);
+    // Converte em JSON por linhas (A -> coluna 1, K -> coluna 11)
+    const range = xlsx.utils.decode_range(sheet['!ref']);
     const codeToQty = {};
 
     for (let R = range.s.r; R <= range.e.r; ++R) {
-      const cellA = sheet[xlsx.utils.encode_cell({ r: R, c: 0 })];   // coluna A
-      const cellK = sheet[xlsx.utils.encode_cell({ r: R, c: 10 })];  // coluna K
-
+      const cellA = sheet[xlsx.utils.encode_cell({ r: R, c: 0 })]; // coluna A
+      const cellK = sheet[xlsx.utils.encode_cell({ r: R, c: 10 })]; // coluna K (0-based)
       if (!cellA) continue;
+      const raw = (cellA.v || '').toString().trim();
+      if (!raw) continue;
 
-      const code = normalize(cellA.v);
-      if (!code) continue;
+      // Normaliza possíveis variações do código (texto, números, sem zeros à esquerda)
+      const digits = raw.replace(/\D/g, '');
+      const noLeadingZeros = digits.replace(/^0+/, '') || digits;
+      const keys = new Set([raw, raw.toLowerCase(), digits, noLeadingZeros]);
 
       let qty = 0;
-      if (cellK?.v !== undefined && cellK?.v !== null) {
+      if (cellK && (cellK.v !== undefined && cellK.v !== null)) {
+        // tenta converter para número
         const n = Number(cellK.v);
         qty = isNaN(n) ? 0 : n;
       }
 
-      codeToQty[code] = qty;
+      // Armazena a mesma quantidade em várias chaves normalizadas para facilitar o lookup
+      for (const k of keys) {
+        if (k) codeToQty[k] = qty;
+      }
     }
 
-    console.log("📊 Códigos lidos da planilha:", Object.keys(codeToQty).length);
-
+    // Buscar assets e atualizar quantidade
     const assets = await Asset.find();
-    console.log("📦 Assets no banco:", assets.length);
+    const unmatched = [];
+    const bulkOps = [];
 
-    const bulkOps = assets
-      .map(a => {
-        const lookupKey = normalize(a.itemErp || a.name);
-        if (lookupKey && codeToQty.hasOwnProperty(lookupKey)) {
-          return {
-            updateOne: {
-              filter: { _id: a._id },
-              update: { $set: { quantidade: codeToQty[lookupKey] } }
-            }
-          };
+    for (const a of assets) {
+      const candidates = [];
+      if (a.itemErp) {
+        const s = a.itemErp.toString().trim();
+        candidates.push(s, s.toLowerCase(), s.replace(/\D/g, ''), s.replace(/\D/g, '').replace(/^0+/, '') || s.replace(/\D/g, ''));
+      }
+      if (a.name) {
+        const s = a.name.toString().trim();
+        candidates.push(s, s.toLowerCase(), s.replace(/\s+/g, ' ').toLowerCase());
+      }
+      // dedupe candidates
+      const seen = new Set();
+      let foundKey = null;
+      for (const c of candidates) {
+        if (!c) continue;
+        if (seen.has(c)) continue;
+        seen.add(c);
+        if (codeToQty.hasOwnProperty(c)) {
+          foundKey = c;
+          break;
         }
-        return null;
-      })
-      .filter(Boolean);
+      }
+      if (foundKey !== null) {
+        bulkOps.push({
+          updateOne: {
+            filter: { _id: a._id },
+            update: { $set: { quantidade: codeToQty[foundKey] } }
+          }
+        });
+      } else {
+        if (unmatched.length < 20) unmatched.push({ id: a._id, name: a.name, itemErp: a.itemErp });
+      }
+    }
 
-    console.log("✅ Registros a atualizar:", bulkOps.length);
+    console.log(`📥 Importado ${Object.keys(codeToQty).length} chaves da planilha. Assets: ${assets.length}, atualizados: ${bulkOps.length}, não encontrados (ex.: ${unmatched.length}):`, unmatched.slice(0, 10));
 
     if (bulkOps.length > 0) {
       await Asset.bulkWrite(bulkOps);
     }
 
-    io.emit("asset-updated");
-    res.json({ success: true, updated: bulkOps.length });
-
+    io.emit('asset-updated');
+    res.json({ success: true, updated: bulkOps.length, parsedKeys: Object.keys(codeToQty).length, unmatchedSample: unmatched.slice(0, 10) });
   } catch (err) {
-    console.error("❌ Erro ao importar quantidades:", err);
-    res.status(500).json({
-      error: "Erro ao importar quantidades",
-      details: err.message
-    });
+    console.error('Erro ao importar quantidades:', err.message || err);
+    res.status(500).json({ error: 'Erro ao importar quantidades', details: err.message });
   }
 });
 
-/* =========================
-   Inicialização
-========================= */
+// Inicialização do servidor
 server.listen(PORT, () => {
   console.log(`🚀 Backend rodando em http://localhost:${PORT}`);
 });
