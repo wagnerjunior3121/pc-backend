@@ -4,6 +4,8 @@ const cors = require("cors");
 const { Server } = require("socket.io");
 const http = require("http");
 const xlsx = require("xlsx");
+const multer = require('multer');
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB limit
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -254,6 +256,117 @@ app.post('/assets/import-quantidades', async (req, res) => {
   } catch (err) {
     console.error('Erro ao importar quantidades:', err.message || err);
     res.status(500).json({ error: 'Erro ao importar quantidades', details: err.message });
+  }
+});
+
+// Novo endpoint: upload XLSX para importar quantidades (multipart/form-data, campo 'file')
+app.post('/assets/import-quantidades/upload', upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+
+    const original = req.file.originalname || '';
+    if (!original.toLowerCase().endsWith('.xlsx') && !original.toLowerCase().endsWith('.xls')) {
+      return res.status(400).json({ error: 'Invalid file type. Please upload .xlsx or .xls' });
+    }
+
+    const buffer = req.file.buffer;
+    const workbook = xlsx.read(buffer, { type: 'buffer', cellDates: true });
+    const sheetName = workbook.SheetNames[0];
+    const sheet = workbook.Sheets[sheetName];
+
+    const range = xlsx.utils.decode_range(sheet['!ref']);
+    const codeToQty = {};
+    const parseFailures = [];
+
+    for (let R = range.s.r; R <= range.e.r; ++R) {
+      const cellA = sheet[xlsx.utils.encode_cell({ r: R, c: 0 })]; // coluna A
+      const cellK = sheet[xlsx.utils.encode_cell({ r: R, c: 10 })]; // coluna K (0-based)
+      if (!cellA) continue;
+      const raw = (cellA.v || '').toString().trim();
+      if (!raw) continue;
+
+      const digits = raw.replace(/\D/g, '');
+      const noLeadingZeros = digits.replace(/^0+/, '') || digits;
+      const keys = new Set([raw, raw.toLowerCase(), digits, noLeadingZeros]);
+
+      let qty = 0;
+      if (cellK && (cellK.v !== undefined && cellK.v !== null)) {
+        let rawQty = cellK.v;
+        if (typeof rawQty === 'string') {
+          rawQty = rawQty.trim();
+          rawQty = rawQty.replace(/\u00A0/g, '');
+          if (rawQty.includes(',') && rawQty.includes('.')) {
+            rawQty = rawQty.replace(/\./g, '').replace(/,/g, '.');
+          } else {
+            rawQty = rawQty.replace(/,/g, '.');
+          }
+          rawQty = rawQty.replace(/[^\d\.\-]/g, '');
+        }
+        const n = Number(rawQty);
+        if (isNaN(n)) {
+          parseFailures.push({ row: R + 1, code: raw, rawValue: cellK.v });
+          qty = 0;
+        } else {
+          qty = n;
+        }
+      }
+
+      for (const k of keys) {
+        if (k) codeToQty[k] = qty;
+      }
+    }
+
+    const assets = await Asset.find();
+    const unmatched = [];
+    const bulkOps = [];
+
+    for (const a of assets) {
+      const candidates = [];
+      if (a.itemErp) {
+        const s = a.itemErp.toString().trim();
+        candidates.push(s, s.toLowerCase(), s.replace(/\D/g, ''), s.replace(/\D/g, '').replace(/^0+/, '') || s.replace(/\D/g, ''));
+      }
+      if (a.name) {
+        const s = a.name.toString().trim();
+        candidates.push(s, s.toLowerCase(), s.replace(/\s+/g, ' ').toLowerCase());
+      }
+      const seen = new Set();
+      let foundKey = null;
+      for (const c of candidates) {
+        if (!c) continue;
+        if (seen.has(c)) continue;
+        seen.add(c);
+        if (codeToQty.hasOwnProperty(c)) {
+          foundKey = c;
+          break;
+        }
+      }
+      if (foundKey !== null) {
+        bulkOps.push({
+          updateOne: {
+            filter: { _id: a._id },
+            update: { $set: { quantidade: codeToQty[foundKey] } }
+          }
+        });
+      } else {
+        if (unmatched.length < 20) unmatched.push({ id: a._id, name: a.name, itemErp: a.itemErp });
+      }
+    }
+
+    console.log(`📥 (UPLOAD) Importado ${Object.keys(codeToQty).length} chaves da planilha. Assets: ${assets.length}, atualizados: ${bulkOps.length}, não encontrados (ex.: ${unmatched.length}):`, unmatched.slice(0, 10));
+    if (parseFailures.length > 0) {
+      console.log(`⚠️ (UPLOAD) ${parseFailures.length} linhas tiveram erro ao parsear quantidade (ex.):`, parseFailures.slice(0, 10));
+    }
+
+    if (bulkOps.length > 0) {
+      await Asset.bulkWrite(bulkOps);
+    }
+
+    io.emit('asset-updated');
+    res.json({ success: true, updated: bulkOps.length, parsedKeys: Object.keys(codeToQty).length, unmatchedSample: unmatched.slice(0, 10), parseFailures: parseFailures.slice(0, 10) });
+  } catch (err) {
+    console.error('Erro ao importar quantidades (upload):', err.message || err);
+    res.status(500).json({ error: 'Erro ao importar quantidades (upload)', details: err.message });
   }
 });
 
