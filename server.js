@@ -1,4 +1,4 @@
-require('dotenv').config();
+require("dotenv").config();
 const express = require("express");
 const mongoose = require("mongoose");
 const cors = require("cors");
@@ -34,13 +34,9 @@ mongoose.connect(process.env.MONGO_URI, {
   useNewUrlParser: true,
   useUnifiedTopology: true,
 })
-.then(() => {
-  console.log("✅ MongoDB conectado");
-  console.log("📂 Banco:", mongoose.connection.name);
-})
+.then(() => console.log("✅ MongoDB conectado"))
 .catch(err => console.log("❌ Erro MongoDB:", err));
 
-// Schema do ativo
 const assetSchema = new mongoose.Schema({
   name: String,
   parentId: { type: String, default: null },
@@ -53,12 +49,10 @@ const assetSchema = new mongoose.Schema({
 
 const Asset = mongoose.model("Asset", assetSchema);
 
-// Rota de teste
 app.get("/", (req, res) => {
   res.send("🚀 Backend ativo e funcionando!");
 });
 
-// Buscar todos os ativos
 app.get(["/assets", "/api/assets"], async (req, res) => {
   try {
     const assets = await Asset.find();
@@ -68,7 +62,6 @@ app.get(["/assets", "/api/assets"], async (req, res) => {
   }
 });
 
-// Criar novo ativo
 app.post(["/assets", "/api/assets"], async (req, res) => {
   try {
     const { name, parentId, isCritical, itemErp, equipmentFunction, quantidade } = req.body;
@@ -82,7 +75,6 @@ app.post(["/assets", "/api/assets"], async (req, res) => {
   }
 });
 
-// Atualizar ativo
 app.put(["/assets/:id", "/api/assets/:id"], async (req, res) => {
   try {
     const { id } = req.params;
@@ -103,7 +95,6 @@ app.put(["/assets/:id", "/api/assets/:id"], async (req, res) => {
   }
 });
 
-// Excluir ativo
 app.delete(["/assets/:id", "/api/assets/:id"], async (req, res) => {
   try {
     const { id } = req.params;
@@ -117,7 +108,6 @@ app.delete(["/assets/:id", "/api/assets/:id"], async (req, res) => {
   }
 });
 
-// Histórico de estados
 let assetsHistory = [];
 
 app.post(["/assets/saveState", "/api/assets/saveState"], (req, res) => {
@@ -144,7 +134,6 @@ app.post(["/assets/restoreState", "/api/assets/restoreState"], (req, res) => {
   }
 });
 
-// WebSocket
 io.on("connection", (socket) => {
   console.log("🟢 Cliente conectado:", socket.id);
   socket.on("disconnect", () => {
@@ -152,19 +141,15 @@ io.on("connection", (socket) => {
   });
 });
 
-// Endpoint para importar quantidades da planilha
-// Recebe JSON opcional: { path: "\\licnt\\tecnica\\...\\mapa_de_estoque.xlsx" }
 app.post('/assets/import-quantidades', async (req, res) => {
   try {
     const defaultPath = '\\licnt\\tecnica\\10_M_Op_G\\Planejamento\\PCM\\Pecas_Criticas_Oficial\\mapa_de_estoque.xlsx';
     const filePath = req.body && req.body.path ? req.body.path : defaultPath;
 
-    // Abre planilha
     const workbook = xlsx.readFile(filePath, { cellDates: true });
     const sheetName = workbook.SheetNames[0];
     const sheet = workbook.Sheets[sheetName];
 
-    // Converte em JSON por linhas (A -> coluna 1, K -> coluna 11)
     const range = xlsx.utils.decode_range(sheet['!ref']);
     const codeToQty = {};
     const parseFailures = [];
@@ -176,7 +161,6 @@ app.post('/assets/import-quantidades', async (req, res) => {
       const raw = (cellA.v || '').toString().trim();
       if (!raw) continue;
 
-      // Normaliza possíveis variações do código (texto, números, sem zeros à esquerda)
       const digits = raw.replace(/\D/g, '');
       const noLeadingZeros = digits.replace(/^0+/, '') || digits;
       const keys = new Set([raw, raw.toLowerCase(), digits, noLeadingZeros]);
@@ -184,24 +168,18 @@ app.post('/assets/import-quantidades', async (req, res) => {
       let qty = 0;
       if (cellK && (cellK.v !== undefined && cellK.v !== null)) {
         let rawQty = cellK.v;
-        // Normalize strings like "7,00" or "1.234,56" to a form Number() understands (e.g. "1234.56")
         if (typeof rawQty === 'string') {
           rawQty = rawQty.trim();
-          // Remove non-breaking spaces
           rawQty = rawQty.replace(/\u00A0/g, '');
-          // If both dot and comma present, assume dot is thousands separator and comma is decimal
           if (rawQty.includes(',') && rawQty.includes('.')) {
             rawQty = rawQty.replace(/\./g, '').replace(/,/g, '.');
           } else {
-            // Replace comma with dot (handles "7,00")
             rawQty = rawQty.replace(/,/g, '.');
           }
-          // Keep only digits, dot and minus
           rawQty = rawQty.replace(/[^\d\.\-]/g, '');
         }
         const n = Number(rawQty);
         if (isNaN(n)) {
-          // save small sample for diagnostics
           parseFailures.push({ row: R + 1, code: raw, rawValue: cellK.v });
           qty = 0;
         } else {
@@ -209,13 +187,11 @@ app.post('/assets/import-quantidades', async (req, res) => {
         }
       }
 
-      // Armazena a mesma quantidade em várias chaves normalizadas para facilitar o lookup
       for (const k of keys) {
         if (k) codeToQty[k] = qty;
       }
     }
 
-    // Buscar assets e atualizar quantidade
     const assets = await Asset.find();
     const unmatched = [];
     const bulkOps = [];
@@ -230,7 +206,6 @@ app.post('/assets/import-quantidades', async (req, res) => {
         const s = a.name.toString().trim();
         candidates.push(s, s.toLowerCase(), s.replace(/\s+/g, ' ').toLowerCase());
       }
-      // dedupe candidates
       const seen = new Set();
       let foundKey = null;
       for (const c of candidates) {
@@ -272,7 +247,6 @@ app.post('/assets/import-quantidades', async (req, res) => {
 });
 
 if (uploadAvailable) {
-  // Novo endpoint: upload XLSX para importar quantidades (multipart/form-data, campo 'file')
   app.post('/assets/import-quantidades/upload', upload.single('file'), async (req, res) => {
     try {
       if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
@@ -373,7 +347,7 @@ if (uploadAvailable) {
 
       if (bulkOps.length > 0) {
         await Asset.bulkWrite(bulkOps);
-      }
+      }   
 
       io.emit('asset-updated');
       res.json({ success: true, updated: bulkOps.length, parsedKeys: Object.keys(codeToQty).length, unmatchedSample: unmatched.slice(0, 10), parseFailures: parseFailures.slice(0, 10) });
@@ -382,13 +356,54 @@ if (uploadAvailable) {
       res.status(500).json({ error: 'Erro ao importar quantidades (upload)', details: err.message });
     }
   });
+  
+  const uploadedSheetSchema = new mongoose.Schema({
+    name: String,
+    type: { type: String, default: 'generic' },
+    parsedRows: { type: Array, default: [] },
+    uploadedAt: { type: Date, default: Date.now },
+    expireAt: { type: Date, default: () => new Date(Date.now() + 24 * 60 * 60 * 1000), index: { expires: '24h' } },
+  });
+  const UploadedSheet = mongoose.model('UploadedSheet', uploadedSheetSchema);
+
+  app.post('/sheets/upload', upload.single('file'), async (req, res) => {
+    try {
+      if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+      const t = (req.query.type && String(req.query.type)) || 'generic';
+      const original = req.file.originalname || 'upload.xlsx';
+      const buffer = req.file.buffer;
+      const workbook = xlsx.read(buffer, { type: 'buffer', cellDates: true });
+      const sheetName = workbook.SheetNames[0];
+      const worksheet = workbook.Sheets[sheetName];
+      const jsonData = xlsx.utils.sheet_to_json(worksheet, { header: 1 });
+
+      const doc = new UploadedSheet({ name: original, type: t, parsedRows: jsonData });
+      await doc.save();
+
+      res.json({ success: true, id: doc._id, parsedRows: jsonData, uploadedAt: doc.uploadedAt });
+    } catch (err) {
+      console.error('Erro ao fazer upload de planilha:', err.message || err);
+      res.status(500).json({ error: 'Erro ao processar upload', details: err.message });
+    }
+  });
+
+  app.get('/sheets/latest', async (req, res) => {
+    try {
+      const t = (req.query.type && String(req.query.type)) || 'generic';
+      const doc = await UploadedSheet.findOne({ type: t }).sort({ uploadedAt: -1 }).lean();
+      if (!doc) return res.status(404).json({ error: 'No sheet found for type' });
+      res.json({ success: true, id: doc._id, parsedRows: doc.parsedRows, uploadedAt: doc.uploadedAt });
+    } catch (err) {
+      console.error('Erro ao buscar sheet mais recente:', err.message || err);
+      res.status(500).json({ error: 'Erro ao buscar sheet', details: err.message });
+    }
+  });
 } else {
   app.post('/assets/import-quantidades/upload', async (req, res) => {
     res.status(501).json({ error: 'Upload endpoint not available: multer is not installed on server. Install multer and redeploy.' });
   });
 }
 
-// Inicialização do servidor
 server.listen(PORT, () => {
   console.log(`🚀 Backend rodando em http://localhost:${PORT}`);
 });
