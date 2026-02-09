@@ -7,7 +7,7 @@ const http = require("http");
 const xlsx = require("xlsx");
 const cron = require("node-cron");
 const nodemailer = require("nodemailer");
-const PDFDocument = require("pdfkit");
+const { buildConsolidatedHtmlFromDb, buildConsolidatedPdfBufferFromDb } = require("./processaPlanoReport");
 let uploadAvailable = false;
 let upload = null;
 try {
@@ -459,100 +459,30 @@ async function buildWeeklyReportEmailHtml() {
   const month = now.getMonth() + 1;
   const monthStr = String(month).padStart(2, '0');
 
-  // Pegamos apenas se existir pelo menos uma planilha de pendentes
-  const pendentesDoc = await UploadedSheet.findOne({ type: 'pendentes' }).sort({ uploadedAt: -1 }).lean();
-  if (!pendentesDoc) {
+  const htmlBase = await buildConsolidatedHtmlFromDb({
+    selectedMonth: `${year}-${monthStr}`,
+    setorFiltro: null,
+  });
+
+  if (!htmlBase) {
     return null;
   }
 
-  const baseInfo = `<p><strong>Mês de referência:</strong> ${monthStr}/${year}</p>`;
-
-  // Por enquanto, enviamos um resumo textual simples e um lembrete para abrir o sistema e gerar o PDF detalhado.
-  // Se quisermos no futuro, podemos replicar toda a lógica de indicadores aqui para bater 100% com o dashboard.
+  // Envolve o HTML base em um wrapper simples para o corpo do e-mail
   const html = `
     <div style="font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-size: 14px; color: #111827;">
       <h2 style="font-size:18px; margin-bottom:4px;">Relatório semanal - Processa Plano</h2>
-      ${baseInfo}
-      <p>Este é um envio automático gerado pelo backend do sistema de PCM.</p>
-      <p>
-        Para visualizar o relatório consolidado completo (com todas as guias: Preventiva Nível 1, Preventiva Nível 2,
-        Lubrificação, Preditivas e Solicitações), acesse o módulo <strong>Processa Plano</strong> no sistema e use o botão
-        <strong>"Gerar relatório em PDF"</strong> na barra superior.
-      </p>
-      <p>
-        Caso deseje que este e-mail traga também os mesmos indicadores numéricos do dashboard (pendentes, realizadas,
-        meta, aderência detalhada por guia), podemos evoluir este job para recalcular os indicadores diretamente no backend.
-      </p>
-      <p style="margin-top:16px; font-size:12px; color:#6b7280;">
-        Mensagem enviada automaticamente pelo backend em ${now.toLocaleString('pt-BR')}.
+      <p style="margin:4px 0; font-size:13px; color:#4b5563;">Mês de referência: ${monthStr}/${year}</p>
+      <p style="margin:4px 0; font-size:13px; color:#4b5563;">Abaixo segue o mesmo relatório consolidado utilizado na tela do Processa Plano.</p>
+      <hr style="margin:12px 0; border:none; border-top:1px solid #e5e7eb;" />
+      ${htmlBase}
+      <p style="margin-top:16px; font-size:11px; color:#6b7280;">
+        Mensagem enviada automaticamente pelo backend do sistema em ${now.toLocaleString('pt-BR')}.
       </p>
     </div>
   `;
 
   return html;
-}
-
-// Gera um PDF simples com um resumo das últimas planilhas carregadas
-async function buildWeeklyReportPdfBuffer() {
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = now.getMonth() + 1;
-  const monthStr = String(month).padStart(2, '0');
-
-  const pendentesDoc = await UploadedSheet.findOne({ type: 'pendentes' }).sort({ uploadedAt: -1 }).lean();
-  if (!pendentesDoc) {
-    return null;
-  }
-
-  const completedDoc = await UploadedSheet.findOne({ type: 'completed' }).sort({ uploadedAt: -1 }).lean();
-  const solicitacoesDoc = await UploadedSheet.findOne({ type: 'solicitacoes' }).sort({ uploadedAt: -1 }).lean();
-
-  const safeLen = (rows) => Array.isArray(rows) ? Math.max(0, rows.length - 1) : 0; // assume primeira linha como cabeçalho
-
-  const totalPendentes = safeLen(pendentesDoc.parsedRows);
-  const totalCompleted = completedDoc ? safeLen(completedDoc.parsedRows) : 0;
-  const totalSolicitacoes = solicitacoesDoc ? safeLen(solicitacoesDoc.parsedRows) : 0;
-
-  return new Promise((resolve, reject) => {
-    try {
-      const doc = new PDFDocument({ size: 'A4', margin: 50 });
-      const chunks = [];
-
-      doc.on('data', (chunk) => chunks.push(chunk));
-      doc.on('end', () => resolve(Buffer.concat(chunks)));
-      doc.on('error', (err) => reject(err));
-
-      doc.fontSize(18).text('Relatório semanal - Processa Plano', { align: 'center' });
-      doc.moveDown(0.5);
-      doc.fontSize(12).text(`Mês de referência: ${monthStr}/${year}`, { align: 'center' });
-      doc.moveDown(1.5);
-
-      doc.fontSize(11).text('Resumo das planilhas mais recentes carregadas no sistema:', { align: 'left' });
-      doc.moveDown(0.8);
-
-      doc.fontSize(11).text(`• Pendentes: ${totalPendentes} linhas (último upload em ${pendentesDoc.uploadedAt ? new Date(pendentesDoc.uploadedAt).toLocaleString('pt-BR') : 'N/D'})`);
-
-      if (completedDoc) {
-        doc.text(`• Concluídas / realizadas: ${totalCompleted} linhas (último upload em ${completedDoc.uploadedAt ? new Date(completedDoc.uploadedAt).toLocaleString('pt-BR') : 'N/D'})`);
-      }
-
-      if (solicitacoesDoc) {
-        doc.text(`• Solicitações: ${totalSolicitacoes} linhas (último upload em ${solicitacoesDoc.uploadedAt ? new Date(solicitacoesDoc.uploadedAt).toLocaleString('pt-BR') : 'N/D'})`);
-      }
-
-      doc.moveDown(1.2);
-      doc.text('Para o detalhamento completo por tipo (Preventiva N1, N2, Lubrificação, Preditivas e Solicitações), utilize o módulo Processa Plano e o botão "Gerar relatório em PDF" na interface.', {
-        align: 'left',
-      });
-
-      doc.moveDown(1.2);
-      doc.fontSize(9).fillColor('#555555').text(`Relatório gerado automaticamente em ${now.toLocaleString('pt-BR')}.`, { align: 'right' });
-
-      doc.end();
-    } catch (err) {
-      reject(err);
-    }
-  });
 }
 
 // Função que executa o fluxo completo do relatório semanal (usada pelo cron e pelo endpoint de teste)
@@ -569,12 +499,19 @@ async function runWeeklyReportJob() {
       return;
     }
 
-    const pdfBuffer = await buildWeeklyReportPdfBuffer();
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = now.getMonth() + 1;
+    const monthStr = String(month).padStart(2, '0');
+
+    const pdfBuffer = await buildConsolidatedPdfBufferFromDb({
+      selectedMonth: `${year}-${monthStr}`,
+      setorFiltro: null,
+    });
     if (!pdfBuffer) {
       console.warn('[relatorio-semanal] Não foi possível gerar o PDF do relatório semanal. E-mail será enviado sem anexo.');
     }
 
-    const now = new Date();
     const subject = `Relatório semanal - Processa Plano (${now.toLocaleDateString('pt-BR')})`;
     const filename = `Relatorio-Semanal-Processa-Plano-${now.toISOString().slice(0, 10)}.pdf`;
 
@@ -608,6 +545,40 @@ app.all('/debug/send-weekly-report', async (req, res) => {
   } catch (err) {
     console.error('[relatorio-semanal] Erro ao executar job via endpoint de debug:', err && err.message ? err.message : err);
     res.status(500).json({ error: 'Erro ao executar job de relatório semanal' });
+  }
+});
+
+// Endpoint para gerar e baixar o PDF consolidado do Processa Plano a partir do frontend
+// Aceita query params opcionais: selectedMonth (YYYY-MM), setor (string ou lista separada por vírgula)
+app.get('/reports/processa-plano/pdf', async (req, res) => {
+  try {
+    const selectedMonth = typeof req.query.selectedMonth === 'string' && /^\d{4}-\d{2}$/.test(req.query.selectedMonth)
+      ? req.query.selectedMonth
+      : null;
+
+    let setorFiltro = null;
+    if (typeof req.query.setor === 'string' && req.query.setor.trim() !== '') {
+      const raw = req.query.setor.trim();
+      if (raw.includes(',')) {
+        setorFiltro = raw.split(',').map(s => s.trim()).filter(Boolean);
+      } else {
+        setorFiltro = raw;
+      }
+    }
+
+    const buffer = await buildConsolidatedPdfBufferFromDb({ selectedMonth, setorFiltro });
+    if (!buffer) {
+      return res.status(404).json({ error: 'Não há planilhas suficientes no backend para gerar o relatório.' });
+    }
+
+    const now = new Date();
+    const filename = `Relatorio-Processa-Plano-${now.toISOString().slice(0, 10)}.pdf`;
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
+    res.send(buffer);
+  } catch (err) {
+    console.error('[relatorio-processa-plano] Erro ao gerar PDF on-demand:', err && err.message ? err.message : err);
+    res.status(500).json({ error: 'Erro ao gerar PDF do relatório Processa Plano' });
   }
 });
 
