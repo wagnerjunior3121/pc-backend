@@ -5,6 +5,9 @@ const cors = require("cors");
 const { Server } = require("socket.io");
 const http = require("http");
 const xlsx = require("xlsx");
+const cron = require("node-cron");
+const nodemailer = require("nodemailer");
+const PDFDocument = require("pdfkit");
 let uploadAvailable = false;
 let upload = null;
 try {
@@ -49,6 +52,16 @@ const assetSchema = new mongoose.Schema({
 });
 
 const Asset = mongoose.model("Asset", assetSchema);
+
+// Model para planilhas carregadas (pendentes, completed, solicitações etc.)
+const uploadedSheetSchema = new mongoose.Schema({
+  name: String,
+  type: { type: String, default: 'generic' },
+  parsedRows: { type: Array, default: [] },
+  uploadedAt: { type: Date, default: Date.now },
+  expireAt: { type: Date, default: () => new Date(Date.now() + 24 * 60 * 60 * 1000), index: { expires: '24h' } },
+});
+const UploadedSheet = mongoose.model('UploadedSheet', uploadedSheetSchema);
 
 // Rota de teste
 app.get("/", (req, res) => {
@@ -379,17 +392,6 @@ if (uploadAvailable) {
       res.status(500).json({ error: 'Erro ao importar quantidades (upload)', details: err.message });
     }
   });
-  
-  // Model to store uploaded sheets for 24 hours
-  const uploadedSheetSchema = new mongoose.Schema({
-    name: String,
-    type: { type: String, default: 'generic' },
-    parsedRows: { type: Array, default: [] },
-    uploadedAt: { type: Date, default: Date.now },
-    expireAt: { type: Date, default: () => new Date(Date.now() + 24 * 60 * 60 * 1000), index: { expires: '24h' } },
-  });
-  const UploadedSheet = mongoose.model('UploadedSheet', uploadedSheetSchema);
-
   // Upload generic sheet and persist parsed rows for 24 hours. Query param `type` optional.
   app.post('/sheets/upload', upload.single('file'), async (req, res) => {
     try {
@@ -433,4 +435,183 @@ if (uploadAvailable) {
 // Inicialização do servidor
 server.listen(PORT, () => {
   console.log(`🚀 Backend rodando em http://localhost:${PORT}`);
+});
+
+// Agendamento semanal para envio automático de resumo do relatório Processa Plano
+// Horário padrão: toda segunda-feira às 08:00 (horário do servidor)
+const REPORT_RECIPIENT = 'pcm.lic@jbs.com.br';
+
+const mailTransporter = nodemailer.createTransport({
+  host: process.env.SMTP_HOST,
+  port: Number(process.env.SMTP_PORT) || 587,
+  secure: process.env.SMTP_SECURE === 'true',
+  auth: process.env.SMTP_USER && process.env.SMTP_PASS
+    ? {
+        user: process.env.SMTP_USER,
+        pass: process.env.SMTP_PASS,
+      }
+    : undefined,
+});
+
+async function buildWeeklyReportEmailHtml() {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = now.getMonth() + 1;
+  const monthStr = String(month).padStart(2, '0');
+
+  // Pegamos apenas se existir pelo menos uma planilha de pendentes
+  const pendentesDoc = await UploadedSheet.findOne({ type: 'pendentes' }).sort({ uploadedAt: -1 }).lean();
+  if (!pendentesDoc) {
+    return null;
+  }
+
+  const baseInfo = `<p><strong>Mês de referência:</strong> ${monthStr}/${year}</p>`;
+
+  // Por enquanto, enviamos um resumo textual simples e um lembrete para abrir o sistema e gerar o PDF detalhado.
+  // Se quisermos no futuro, podemos replicar toda a lógica de indicadores aqui para bater 100% com o dashboard.
+  const html = `
+    <div style="font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-size: 14px; color: #111827;">
+      <h2 style="font-size:18px; margin-bottom:4px;">Relatório semanal - Processa Plano</h2>
+      ${baseInfo}
+      <p>Este é um envio automático gerado pelo backend do sistema de PCM.</p>
+      <p>
+        Para visualizar o relatório consolidado completo (com todas as guias: Preventiva Nível 1, Preventiva Nível 2,
+        Lubrificação, Preditivas e Solicitações), acesse o módulo <strong>Processa Plano</strong> no sistema e use o botão
+        <strong>"Gerar relatório em PDF"</strong> na barra superior.
+      </p>
+      <p>
+        Caso deseje que este e-mail traga também os mesmos indicadores numéricos do dashboard (pendentes, realizadas,
+        meta, aderência detalhada por guia), podemos evoluir este job para recalcular os indicadores diretamente no backend.
+      </p>
+      <p style="margin-top:16px; font-size:12px; color:#6b7280;">
+        Mensagem enviada automaticamente pelo backend em ${now.toLocaleString('pt-BR')}.
+      </p>
+    </div>
+  `;
+
+  return html;
+}
+
+// Gera um PDF simples com um resumo das últimas planilhas carregadas
+async function buildWeeklyReportPdfBuffer() {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = now.getMonth() + 1;
+  const monthStr = String(month).padStart(2, '0');
+
+  const pendentesDoc = await UploadedSheet.findOne({ type: 'pendentes' }).sort({ uploadedAt: -1 }).lean();
+  if (!pendentesDoc) {
+    return null;
+  }
+
+  const completedDoc = await UploadedSheet.findOne({ type: 'completed' }).sort({ uploadedAt: -1 }).lean();
+  const solicitacoesDoc = await UploadedSheet.findOne({ type: 'solicitacoes' }).sort({ uploadedAt: -1 }).lean();
+
+  const safeLen = (rows) => Array.isArray(rows) ? Math.max(0, rows.length - 1) : 0; // assume primeira linha como cabeçalho
+
+  const totalPendentes = safeLen(pendentesDoc.parsedRows);
+  const totalCompleted = completedDoc ? safeLen(completedDoc.parsedRows) : 0;
+  const totalSolicitacoes = solicitacoesDoc ? safeLen(solicitacoesDoc.parsedRows) : 0;
+
+  return new Promise((resolve, reject) => {
+    try {
+      const doc = new PDFDocument({ size: 'A4', margin: 50 });
+      const chunks = [];
+
+      doc.on('data', (chunk) => chunks.push(chunk));
+      doc.on('end', () => resolve(Buffer.concat(chunks)));
+      doc.on('error', (err) => reject(err));
+
+      doc.fontSize(18).text('Relatório semanal - Processa Plano', { align: 'center' });
+      doc.moveDown(0.5);
+      doc.fontSize(12).text(`Mês de referência: ${monthStr}/${year}`, { align: 'center' });
+      doc.moveDown(1.5);
+
+      doc.fontSize(11).text('Resumo das planilhas mais recentes carregadas no sistema:', { align: 'left' });
+      doc.moveDown(0.8);
+
+      doc.fontSize(11).text(`• Pendentes: ${totalPendentes} linhas (último upload em ${pendentesDoc.uploadedAt ? new Date(pendentesDoc.uploadedAt).toLocaleString('pt-BR') : 'N/D'})`);
+
+      if (completedDoc) {
+        doc.text(`• Concluídas / realizadas: ${totalCompleted} linhas (último upload em ${completedDoc.uploadedAt ? new Date(completedDoc.uploadedAt).toLocaleString('pt-BR') : 'N/D'})`);
+      }
+
+      if (solicitacoesDoc) {
+        doc.text(`• Solicitações: ${totalSolicitacoes} linhas (último upload em ${solicitacoesDoc.uploadedAt ? new Date(solicitacoesDoc.uploadedAt).toLocaleString('pt-BR') : 'N/D'})`);
+      }
+
+      doc.moveDown(1.2);
+      doc.text('Para o detalhamento completo por tipo (Preventiva N1, N2, Lubrificação, Preditivas e Solicitações), utilize o módulo Processa Plano e o botão "Gerar relatório em PDF" na interface.', {
+        align: 'left',
+      });
+
+      doc.moveDown(1.2);
+      doc.fontSize(9).fillColor('#555555').text(`Relatório gerado automaticamente em ${now.toLocaleString('pt-BR')}.`, { align: 'right' });
+
+      doc.end();
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
+// Função que executa o fluxo completo do relatório semanal (usada pelo cron e pelo endpoint de teste)
+async function runWeeklyReportJob() {
+  try {
+    if (!process.env.SMTP_HOST || !process.env.SMTP_USER || !process.env.SMTP_PASS) {
+      console.warn('[relatorio-semanal] SMTP não configurado (SMTP_HOST/SMTP_USER/SMTP_PASS ausentes). E-mail não será enviado.');
+      return;
+    }
+
+    const html = await buildWeeklyReportEmailHtml();
+    if (!html) {
+      console.warn('[relatorio-semanal] Nenhuma planilha pendente encontrada para montar o e-mail.');
+      return;
+    }
+
+    const pdfBuffer = await buildWeeklyReportPdfBuffer();
+    if (!pdfBuffer) {
+      console.warn('[relatorio-semanal] Não foi possível gerar o PDF do relatório semanal. E-mail será enviado sem anexo.');
+    }
+
+    const now = new Date();
+    const subject = `Relatório semanal - Processa Plano (${now.toLocaleDateString('pt-BR')})`;
+    const filename = `Relatorio-Semanal-Processa-Plano-${now.toISOString().slice(0, 10)}.pdf`;
+
+    await mailTransporter.sendMail({
+      from: process.env.SMTP_FROM || process.env.SMTP_USER,
+      to: REPORT_RECIPIENT,
+      subject,
+      html,
+      attachments: pdfBuffer
+        ? [
+            {
+              filename,
+              content: pdfBuffer,
+            },
+          ]
+        : undefined,
+    });
+
+    console.log(`[relatorio-semanal] E-mail enviado para ${REPORT_RECIPIENT} em`, now.toISOString());
+  } catch (err) {
+    console.error('[relatorio-semanal] Falha ao enviar e-mail semanal:', err && err.message ? err.message : err);
+  }
+}
+
+// Endpoint de teste para disparar o relatório semanal manualmente
+// Aceita tanto POST (para Postman/curl) quanto GET (para testar via navegador)
+app.all('/debug/send-weekly-report', async (req, res) => {
+  try {
+    await runWeeklyReportJob();
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[relatorio-semanal] Erro ao executar job via endpoint de debug:', err && err.message ? err.message : err);
+    res.status(500).json({ error: 'Erro ao executar job de relatório semanal' });
+  }
+});
+
+// Cron: minuto hora dia-mês mês dia-semana => 0 8 * * 1  (segunda às 08:00)
+cron.schedule('0 8 * * 1', async () => {
+  await runWeeklyReportJob();
 });
